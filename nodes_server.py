@@ -66,7 +66,7 @@ SAMPLING_KEYS = ["max_tokens", "temperature", "top_p", "top_k", "min_p", "repeat
 # Widgets a preset may set. ``model``/``mmproj`` are matched by substring on the
 # frontend because the actual file names depend on the user's models folder.
 PRESET_KEYS = [
-    "mode", "base_url", "n_ctx", "n_gpu_layers", "image_max_tokens", "extra_args",
+    "mode", "base_url", "server_exe", "cuda_devices", "n_ctx", "n_gpu_layers", "image_max_tokens", "extra_args",
     "enable_thinking", "reasoning_effort", *SAMPLING_KEYS,
 ]
 
