@@ -315,11 +315,15 @@ def server_chat_completion(server, messages, seed):
     content_parts = []
     reasoning_parts = []
     try:
-        for raw_line in response.iter_lines(decode_unicode=True):
+        # Decode ourselves: llama-server sends ``text/event-stream`` without a charset,
+        # so requests would otherwise fall back to ISO-8859-1 and garble CJK text.
+        for raw_line in response.iter_lines():
             if mm.processing_interrupted():
                 raise mm.InterruptProcessingException()
             if not raw_line:
                 continue
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode("utf-8", errors="replace")
             line = raw_line.strip()
             if line.startswith("error:") or line.startswith("event: error"):
                 raise RuntimeError(f"llama-server stream error: {line}")
