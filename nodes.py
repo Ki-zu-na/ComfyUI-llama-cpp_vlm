@@ -16,6 +16,7 @@ from scipy.ndimage import gaussian_filter
 from .support.cqdm import cqdm
 from .support.gguf_layers import get_layer_count
 from .support.prompt_enhancer_preset import *
+from .support.result_cache import RESULT_CACHE, hash_image, hash_audio, make_key
 
 import folder_paths
 import comfy.model_management as mm
@@ -821,6 +822,10 @@ class llama_cpp_multimodal_prompt:
                     "default": False,
                     "tooltip": "Unload the llama.cpp model after generation.",
                 }),
+                "use_cache": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Reuse the previous result when model, parameters, prompts, seed and every image/frame are unchanged. Cache size is set on the model loader.",
+                }),
                 "parameters": ("LLAMACPPARAMS",),
             },
         }
@@ -846,12 +851,8 @@ class llama_cpp_multimodal_prompt:
         filter_thinking=True,
         force_offload=False,
         parameters=None,
+        use_cache=True,
     ):
-        if not LLAMA_CPP_STORAGE.llm:
-            LLAMA_CPP_STORAGE.load_model(llama_model)
-        else:
-            LLAMA_CPP_STORAGE.ensure_embedding_mode(False)
-
         image_frames = prompt_builder_frames(images, max_images)
         video_frames = []
         video_audio = None
@@ -859,6 +860,26 @@ class llama_cpp_multimodal_prompt:
             video_components = video.get_components()
             video_frames = prompt_builder_frames(video_components.images, video_max_frames)
             video_audio = video_components.audio
+
+        cache_key = None
+        if use_cache and RESULT_CACHE.enabled:
+            cache_key = make_key(
+                "multimodal_prompt", llama_model, parameters, system_prompt, user_prompt, seed,
+                [hash_image(f) for f in image_frames], [hash_image(f) for f in video_frames],
+                hash_audio(video_audio) if include_video_audio else None, hash_audio(audio),
+                image_max_size, filter_thinking,
+            )
+            cached = RESULT_CACHE.get(cache_key)
+            if cached is not None:
+                print("[llama-cpp_vlm] Result cache hit, skipping inference.")
+                if force_offload:
+                    LLAMA_CPP_STORAGE.clean()
+                return tuple(cached)
+
+        if not LLAMA_CPP_STORAGE.llm:
+            LLAMA_CPP_STORAGE.load_model(llama_model)
+        else:
+            LLAMA_CPP_STORAGE.ensure_embedding_mode(False)
 
         media_present = bool(
             image_frames
@@ -977,6 +998,8 @@ class llama_cpp_multimodal_prompt:
         result = re.sub(r"^```(?:text|markdown|plaintext)?\s*", "", result.strip(), flags=re.IGNORECASE)
         result = re.sub(r"\s*```$", "", result).strip()
         thinking_text = thinking_text.strip()
+        if cache_key is not None:
+            RESULT_CACHE.put(cache_key, [result, thinking_text])
         gc.collect()
         return (result, thinking_text)
 
@@ -1024,6 +1047,10 @@ class llama_cpp_model_loader:
                     "default": False,
                     "tooltip": "Load MTP layers when supported by llama-cpp-python 0.3.46 or newer."
                 }),
+                "cache_size": ("INT", {
+                    "default": 64, "min": 0, "max": 4096, "step": 1,
+                    "tooltip": "Number of inference results kept in the persistent result cache (0 = disable). Oldest results are evicted automatically."
+                }),
             },
         }
 
@@ -1058,7 +1085,8 @@ class llama_cpp_model_loader:
             return True
         return f'Unknown chat_handler: "{chat_handler}"'
 
-    def loadmodel(self, model, mmproj, chat_handler, enable_thinking, n_ctx, vram_limit, n_cpu_moe, image_min_tokens, image_max_tokens, load_mtp=False):
+    def loadmodel(self, model, mmproj, chat_handler, enable_thinking, n_ctx, vram_limit, n_cpu_moe, image_min_tokens, image_max_tokens, load_mtp=False, cache_size=64):
+        RESULT_CACHE.set_limit(cache_size)
         chat_handler, enable_thinking = normalize_chat_handler(chat_handler, enable_thinking)
         custom_config = {
             "model": model,
@@ -1125,6 +1153,10 @@ class llama_cpp_instruct_adv:
                 "parameters": ("LLAMACPPARAMS",),
                 "images": ("IMAGE",),
                 "queue_handler": (any_type, {"tooltip": "Used to control the execution order of instruct nodes."}),
+                "use_cache": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Reuse the previous result when model, parameters, prompts, seed and every image are unchanged (ignored when save_states is on). Cache size is set on the model loader.",
+                }),
             },
             
         }
@@ -1146,7 +1178,8 @@ class llama_cpp_instruct_adv:
                         item["image_url"]["url"] = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAsTAAALEwEAmpwYAAAADElEQVQImWP4//8/AAX+Av5Y8msOAAAAAElFTkSuQmCC"
         return clean_messages
     
-    def process(self, llama_model, preset_prompt, custom_prompt, system_prompt, inference_mode, max_frames, max_size, seed, force_offload, save_states, filter_thinking, unique_id, parameters=None, images=None, queue_handler=None):
+    def process(self, llama_model, preset_prompt, custom_prompt, system_prompt, inference_mode, max_frames, max_size, seed, force_offload, save_states, filter_thinking, unique_id, parameters=None, images=None, queue_handler=None, use_cache=True):
+        use_cache = use_cache[0] if isinstance(use_cache, list) else use_cache
         llama_model = llama_model[0] if isinstance(llama_model, list) else llama_model
         preset_prompt = preset_prompt[0] if isinstance(preset_prompt, list) else preset_prompt
         custom_prompt = custom_prompt[0] if isinstance(custom_prompt, list) else custom_prompt
@@ -1160,6 +1193,31 @@ class llama_cpp_instruct_adv:
         filter_thinking = filter_thinking[0] if isinstance(filter_thinking, list) else filter_thinking
         unique_id = unique_id[0] if isinstance(unique_id, list) else unique_id
         parameters = parameters[0] if isinstance(parameters, list) and parameters else parameters
+
+        cache_key = None
+        if use_cache and not save_states and RESULT_CACHE.enabled:
+            raw_images = [image for image in images if image is not None] if isinstance(images, list) else ([images] if images is not None else [])
+            image_hashes = []
+            for image_item in raw_images:
+                if image_item.ndim == 3:
+                    image_hashes.append([hash_image(image_item)])
+                else:
+                    image_hashes.append([hash_image(image_item[index]) for index in range(image_item.shape[0])])
+            cache_parameters = dict(parameters) if parameters else None
+            if cache_parameters:
+                cache_parameters.pop("state_uid", None)
+            cache_key = make_key(
+                "instruct", llama_model, cache_parameters, preset_prompt, custom_prompt, system_prompt,
+                inference_mode, max_frames, max_size, seed, filter_thinking, image_hashes,
+            )
+            cached = RESULT_CACHE.get(cache_key)
+            if cached is not None:
+                print("[llama-cpp_vlm] Result cache hit, skipping inference.")
+                if force_offload:
+                    LLAMA_CPP_STORAGE.clean()
+                uid = str(unique_id).rpartition('.')[-1]
+                out1, out2, thinking_out, answer_out = cached
+                return (out1, list(out2), thinking_out, answer_out, uid)
 
         if not LLAMA_CPP_STORAGE.llm:
             LLAMA_CPP_STORAGE.load_model(llama_model)
@@ -1378,6 +1436,8 @@ class llama_cpp_instruct_adv:
                 if LLAMA_CPP_STORAGE.llm.is_hybrid and LLAMA_CPP_STORAGE.llm._hybrid_cache_mgr is not None:
                     LLAMA_CPP_STORAGE.llm._hybrid_cache_mgr.clear()
             
+        if cache_key is not None:
+            RESULT_CACHE.put(cache_key, [out1, list(out2), thinking_out, answer_out])
         del messages
         gc.collect()
         return (out1, out2, thinking_out, answer_out, uid)
@@ -1428,16 +1488,25 @@ class llama_cpp_clean_states:
                     "tooltip": "Clear the saved state for a specific ID (-1 = clear all)"
                 }),
             },
+            "optional": {
+                "clear_result_cache": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Also wipe the persistent inference result cache shared by all llama-cpp nodes."
+                }),
+            },
         }
-    
+
     RETURN_TYPES = (any_type,)
     RETURN_NAMES = ("any",)
     FUNCTION = "process"
     CATEGORY = "llama-cpp-vlm"
-    
-    def process(self, any, state_uid):
+
+    def process(self, any, state_uid, clear_result_cache=False):
         print(f"[llama-cpp_vlm] Cleaning up saved states {state_uid}...")
         LLAMA_CPP_STORAGE.clean_state(state_uid)
+        if clear_result_cache:
+            print("[llama-cpp_vlm] Clearing result cache...")
+            RESULT_CACHE.clear()
         return (any,)
 
 class llama_cpp_unload_model:

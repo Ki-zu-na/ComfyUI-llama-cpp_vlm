@@ -45,6 +45,16 @@ Quick start for Bonsai-2:
 machine) works too. `cuda_devices` (advanced) sets `CUDA_VISIBLE_DEVICES` for the server so it can live on a
 different GPU than ComfyUI. User presets are stored in `server_presets.json` next to the node.
 
+### Result cache
+
+Every generation node (in-process and remote) has a `use_cache` switch (on by default). When the model or
+server, sampling parameters, prompts, seed and the exact pixels of every image/frame are unchanged, the
+previous output is returned without running inference or even loading the model. The cache is a persistent
+LRU store (`result_cache.json` next to the node); its size is set with `cache_size` on **Llama-cpp Model
+Loader** / **Llama-cpp Server** (0 disables it) and old entries are evicted automatically. Conversations
+with `save_states` on always bypass it. Clear it with the **Clear result cache** button on the server node
+or the `clear_result_cache` option of **Llama-cpp Clean States**.
+
 ## Credits  
 - [llama-cpp-python](https://github.com/JamePeng/llama-cpp-python) @JamePeng  
 - [ComfyUI-llama-cpp](https://github.com/kijai/ComfyUI-llama-cpp) @kijai  

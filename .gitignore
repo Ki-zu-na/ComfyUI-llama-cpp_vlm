@@ -6,3 +6,5 @@ checkpoints/
 .pytest_cache
 .DS_Store
 server_presets.json
+result_cache.json
+result_cache.json.tmp

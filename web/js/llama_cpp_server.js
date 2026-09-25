@@ -171,6 +171,17 @@ app.registerExtension({
             }, { serialize: false });
             clearStates.__llamaExtra = true;
 
+            const clearCache = node.addWidget("button", "♻ Clear result cache", null, async () => {
+                try {
+                    await apiJson("/clear_cache", { method: "POST", body: "{}" });
+                    toast("info", "Inference result cache cleared");
+                    node.__llamaRefresh();
+                } catch (e) {
+                    toast("error", "Clear cache failed", e.message);
+                }
+            }, { serialize: false });
+            clearCache.__llamaExtra = true;
+
             // ---- preset application -------------------------------------------------
             const applyPreset = async (name) => {
                 if (!name || name === CUSTOM_PRESET) return;
@@ -232,7 +243,8 @@ app.registerExtension({
                     const model = props.model ? props.model.replace(/\.gguf$/i, "") : "";
                     const caps = props.vision ? "vision" : (props.model ? "text-only" : "");
                     const ctx = props.n_ctx ? `${props.n_ctx} ctx` : "";
-                    const detail = [model, caps, ctx].filter(Boolean).join(" · ");
+                    const cache = data.cache && data.cache.max_entries > 0 ? `cache ${data.cache.entries}/${data.cache.max_entries}` : "";
+                    const detail = [model, caps, ctx, cache].filter(Boolean).join(" · ");
 
                     if (managed && data.healthy) {
                         setStatus(`● running · ${detail}`, "#5fbf5f");

@@ -31,6 +31,7 @@ import folder_paths
 import comfy.model_management as mm
 
 from .support.cqdm import cqdm
+from .support.result_cache import RESULT_CACHE, hash_image, hash_audio, make_key
 from .nodes import (
     any_type,
     image2base64,
@@ -213,6 +214,17 @@ def summarize_props(props):
         "vision": bool((props.get("modalities") or {}).get("vision")),
         "n_ctx": props.get("default_generation_settings", {}).get("n_ctx"),
         "slots": props.get("total_slots"),
+    }
+
+
+def cache_identity(server):
+    """The parts of a server config that influence generated text."""
+    server = server or {}
+    return {
+        "served_model": server.get("served_model") or server.get("base_url"),
+        "enable_thinking": server.get("enable_thinking", False),
+        "reasoning_effort": server.get("reasoning_effort", "default"),
+        "sampling": server.get("sampling") or {},
     }
 
 
@@ -690,6 +702,10 @@ class llama_cpp_server:
                 "api_key": ("STRING", {"default": "", "advanced": True, "tooltip": "Bearer token if the server uses --api-key."}),
                 "timeout": ("INT", {"default": DEFAULT_TIMEOUT, "min": 10, "max": 7200, "step": 10, "advanced": True, "tooltip": "Seconds to wait for one generation."}),
                 "startup_timeout": ("INT", {"default": 600, "min": 30, "max": 3600, "step": 10, "advanced": True, "tooltip": "Seconds to wait for the model to load in launch mode."}),
+                "cache_size": ("INT", {
+                    "default": 64, "min": 0, "max": 4096, "step": 1, "advanced": True,
+                    "tooltip": "Number of inference results kept in the persistent result cache shared by all llama-cpp nodes (0 = disable). Oldest results are evicted automatically.",
+                }),
             },
         }
 
@@ -705,7 +721,8 @@ class llama_cpp_server:
 
     def configure(self, preset, mode, base_url, server_exe, model, mmproj, n_ctx, enable_thinking, reasoning_effort,
                   max_tokens, temperature, top_p, top_k, min_p, repeat_penalty, presence_penalty, n_gpu_layers,
-                  image_max_tokens, cuda_devices, extra_args, api_key, timeout, startup_timeout):
+                  image_max_tokens, cuda_devices, extra_args, api_key, timeout, startup_timeout, cache_size=64):
+        RESULT_CACHE.set_limit(cache_size)
         base_url = normalize_base_url(base_url)
         values = {
             "server_exe": server_exe, "model": model, "mmproj": mmproj, "base_url": base_url,
@@ -733,6 +750,8 @@ class llama_cpp_server:
             "timeout": timeout,
             "stream": True,
             "modalities": props.get("modalities") or {},
+            # Identity used by the result cache: which model is actually served.
+            "served_model": os.path.basename(str(props.get("model_path") or "")) or base_url,
             "sampling": {
                 "max_tokens": max_tokens,
                 "temperature": temperature,
@@ -773,6 +792,10 @@ class llama_cpp_server_multimodal_prompt:
                 }),
                 "include_video_audio": ("BOOLEAN", {"default": False}),
                 "filter_thinking": ("BOOLEAN", {"default": True, "tooltip": "Keep reasoning out of the prompt output."}),
+                "use_cache": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Reuse the previous result when server model, sampling, prompts, seed and every image/frame are unchanged. Cache size is set on the server node.",
+                }),
             },
         }
 
@@ -782,7 +805,8 @@ class llama_cpp_server_multimodal_prompt:
     CATEGORY = "llama-cpp-vlm/server"
 
     def process(self, llama_server, system_prompt, user_prompt, seed, images=None, video=None, audio=None,
-                max_images=16, video_max_frames=8, image_max_size=1024, include_video_audio=False, filter_thinking=True):
+                max_images=16, video_max_frames=8, image_max_size=1024, include_video_audio=False, filter_thinking=True,
+                use_cache=True):
         image_frames = prompt_builder_frames(images, max_images)
         video_frames = []
         video_audio = None
@@ -790,6 +814,19 @@ class llama_cpp_server_multimodal_prompt:
             components = video.get_components()
             video_frames = prompt_builder_frames(components.images, video_max_frames)
             video_audio = components.audio
+
+        cache_key = None
+        if use_cache and RESULT_CACHE.enabled:
+            cache_key = make_key(
+                "server_multimodal_prompt", cache_identity(llama_server), system_prompt, user_prompt, seed,
+                [hash_image(f) for f in image_frames], [hash_image(f) for f in video_frames],
+                hash_audio(video_audio) if include_video_audio else None, hash_audio(audio),
+                image_max_size, filter_thinking,
+            )
+            cached = RESULT_CACHE.get(cache_key)
+            if cached is not None:
+                _log("Result cache hit, skipping inference.")
+                return tuple(cached)
 
         if (image_frames or video_frames) and not server_supports_vision(llama_server):
             raise ValueError("The connected llama-server reports no vision support. Select an mmproj / start it with --mmproj.")
@@ -843,8 +880,11 @@ class llama_cpp_server_multimodal_prompt:
 
         content, reasoning = server_chat_completion(llama_server, messages, seed)
         result, thinking_text, _ = finalize_output(content, reasoning, filter_thinking)
+        result = strip_code_fence(result)
+        if cache_key is not None:
+            RESULT_CACHE.put(cache_key, [result, thinking_text])
         gc.collect()
-        return (strip_code_fence(result), thinking_text)
+        return (result, thinking_text)
 
 
 class llama_cpp_server_instruct:
@@ -872,6 +912,10 @@ class llama_cpp_server_instruct:
             "optional": {
                 "images": ("IMAGE",),
                 "queue_handler": (any_type, {"tooltip": "Used to control the execution order of instruct nodes."}),
+                "use_cache": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Reuse the previous result when server model, sampling, prompts, seed and every image are unchanged (ignored when save_states is on). Cache size is set on the server node.",
+                }),
             },
         }
 
@@ -898,8 +942,9 @@ class llama_cpp_server_instruct:
         return value[0] if isinstance(value, list) else value
 
     def process(self, llama_server, preset_prompt, custom_prompt, system_prompt, inference_mode, max_frames, max_size,
-                seed, save_states, filter_thinking, unique_id, images=None, queue_handler=None):
+                seed, save_states, filter_thinking, unique_id, images=None, queue_handler=None, use_cache=True):
         first = self._first
+        use_cache = first(use_cache)
         llama_server = first(llama_server)
         preset_prompt = first(preset_prompt)
         custom_prompt = first(custom_prompt)
@@ -946,6 +991,19 @@ class llama_cpp_server_instruct:
                 image_groups.append([image_item[index] for index in range(image_item.shape[0])])
             else:
                 raise ValueError(f"Expected IMAGE input with 3 or 4 dimensions, got {tuple(image_item.shape)}.")
+
+        cache_key = None
+        if use_cache and not save_states and RESULT_CACHE.enabled:
+            cache_key = make_key(
+                "server_instruct", cache_identity(llama_server), preset_prompt, custom_prompt, system_prompt,
+                inference_mode, max_frames, max_size, seed, filter_thinking,
+                [[hash_image(frame) for frame in group] for group in image_groups],
+            )
+            cached = RESULT_CACHE.get(cache_key)
+            if cached is not None:
+                _log("Result cache hit, skipping inference.")
+                out1, out2, thinking_out, answer_out = cached
+                return (out1, list(out2), thinking_out, answer_out, uid)
 
         if image_groups and not server_supports_vision(llama_server):
             raise ValueError("Image input detected, but the connected llama-server has no vision projector (mmproj).")
@@ -1022,6 +1080,8 @@ class llama_cpp_server_instruct:
         elif not SERVER_STORAGE.messages.get(f"{uid}"):
             SERVER_STORAGE.sys_prompts.pop(f"{uid}", None)
 
+        if cache_key is not None:
+            RESULT_CACHE.put(cache_key, [out1, list(out2), thinking_out, answer_out])
         del messages
         gc.collect()
         return (out1, out2, thinking_out, answer_out, uid)
@@ -1048,7 +1108,7 @@ def register_routes(routes):
         base_url = request.query.get("base_url") or None
         if base_url:
             base_url = normalize_base_url(base_url)
-        return ok(MANAGED.status(base_url))
+        return ok(MANAGED.status(base_url), cache=RESULT_CACHE.stats())
 
     @routes.post(f"{ROUTE_PREFIX}/start")
     async def start(request):
@@ -1069,6 +1129,11 @@ def register_routes(routes):
     async def clear_states(request):
         SERVER_STORAGE.clean_state(-1)
         return ok()
+
+    @routes.post(f"{ROUTE_PREFIX}/clear_cache")
+    async def clear_cache(request):
+        RESULT_CACHE.clear()
+        return ok(cache=RESULT_CACHE.stats())
 
     @routes.get(f"{ROUTE_PREFIX}/presets")
     async def get_presets(request):

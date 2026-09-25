@@ -44,6 +44,14 @@ Bonsai-2 快速上手：
 `connect` 模式不启动进程，只连接 `base_url`，手动启动或在其他机器上的服务也能用。高级项 `cuda_devices`
 会给服务进程设置 `CUDA_VISIBLE_DEVICES`，可让它和 ComfyUI 分别占用不同显卡。用户预设保存在节点目录下的 `server_presets.json`。
 
+### 结果缓存
+
+所有生成节点（进程内和远程）都有 `use_cache` 开关（默认开）。当模型或服务、采样参数、提示词、seed
+以及每张图片/帧的像素都没有变化时，直接返回上次的输出，不再推理，也不会加载模型。缓存是持久化的
+LRU 存储（节点目录下的 `result_cache.json`），容量由 **Llama-cpp Model Loader** / **Llama-cpp Server**
+上的 `cache_size` 决定（0 表示关闭），超出后自动淘汰最旧的结果。开启 `save_states` 的多轮对话始终不走缓存。
+可用服务节点上的 **Clear result cache** 按钮或 **Llama-cpp Clean States** 的 `clear_result_cache` 选项清空。
+
 ## 致谢
 - [llama-cpp-python](https://github.com/JamePeng/llama-cpp-python) @JamePeng  
 - [ComfyUI-llama-cpp](https://github.com/kijai/ComfyUI-llama-cpp) @kijai
