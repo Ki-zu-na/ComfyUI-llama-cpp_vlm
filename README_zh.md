@@ -30,7 +30,7 @@ python -m pip install -r ComfyUI-llama-cpp/requirements.txt
 
 | 节点 | 作用 |
 |---|---|
-| **Llama-cpp Server** | 一个节点搞定全部：预设选择、launch/connect 模式、模型 + mmproj、上下文、思考开关、采样参数。按钮：**启动/停止服务**、**保存/删除预设**、**清理对话历史**，并有实时状态行。 |
+| **Llama-cpp Server** | 一个节点搞定全部。画布上只显示预设、模型、mmproj、思考开关，加一行实时状态和两个按钮：**▶ 启动 / ■ 停止服务** 与 **⚙ 设置**。设置面板里是连接（launch/connect、URL、exe 路径）、启动（显卡、上下文、图片 token、额外参数）、生成（采样、思考强度、超时）和缓存选项，以及 **保存/删除预设**、**清理结果缓存**、**清理对话历史**。 |
 | **Llama-cpp Server Multimodal Prompt Builder** | 与 *Llama-cpp Multimodal Prompt Builder* 一致（IMAGE / VIDEO / AUDIO 输入），采样参数直接来自服务节点。 |
 | **Llama-cpp Server Instruct** | 与 *Llama-cpp Instruct* 一致（one by one / images / video 模式）。 |
 

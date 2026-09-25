@@ -30,7 +30,7 @@ Some GGUFs need a patched llama.cpp that llama-cpp-python does not ship. The mos
 
 | Node | Purpose |
 |---|---|
-| **Llama-cpp Server** | One node for everything: preset selector, launch/connect mode, model + mmproj, context, thinking switch, sampling. Buttons: **Start/Stop server**, **Save/Delete preset**, **Clear chat history**, plus a live status line. |
+| **Llama-cpp Server** | One node for everything. The canvas only shows preset, model, mmproj and the thinking switch plus a live status line and two buttons: **▶ Start / ■ Stop server** and **⚙ Settings**. The settings panel holds connection (launch/connect, URL, exe path), launch (GPU, context, image tokens, extra args), generation (sampling, reasoning effort, timeouts) and cache options, plus **Save/Delete preset**, **Clear result cache** and **Clear chat history**. |
 | **Llama-cpp Server Multimodal Prompt Builder** | Same as *Llama-cpp Multimodal Prompt Builder* (IMAGE / VIDEO / AUDIO inputs); sampling comes from the server node. |
 | **Llama-cpp Server Instruct** | Same as *Llama-cpp Instruct* (one by one / images / video modes). |
 
