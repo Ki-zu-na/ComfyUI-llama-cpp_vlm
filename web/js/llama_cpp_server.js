@@ -107,7 +107,8 @@ function injectCss() {
 .llama-srv-row label{opacity:.9;cursor:help}
 .llama-srv-row input[type=text],.llama-srv-row input[type=number],.llama-srv-row select{width:100%;box-sizing:border-box;background:var(--comfy-input-bg,#1a1a1a);color:var(--input-text,#ddd);border:1px solid var(--border-color,#444);border-radius:6px;padding:5px 8px;font:inherit}
 .llama-srv-row input[type=checkbox]{width:16px;height:16px}
-.llama-srv-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.llama-srv-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.llama-srv-actions .llama-srv-btn{white-space:nowrap;text-align:center}
 .llama-srv-btn{background:var(--comfy-input-bg,#1a1a1a);color:var(--input-text,#ddd);border:1px solid var(--border-color,#444);border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}
 .llama-srv-btn:hover{border-color:var(--p-primary-color,#6fa8dc)}
 .llama-srv-btn.danger:hover{border-color:#d9534f;color:#f28b85}
@@ -391,8 +392,27 @@ app.registerExtension({
                 node.__llamaRefresh();
             }, POLL_MS);
             setTimeout(() => node.__llamaRefresh(), 300);
-            // Hidden widgets shrink the node: recompute the size once.
-            setTimeout(() => { node.setSize(node.computeSize()); node.setDirtyCanvas(true, true); }, 0);
+            // Fresh node (not restored from a workflow): give it a comfortable width and
+            // the compact height. Restored nodes keep their saved size (see onConfigure).
+            setTimeout(() => {
+                if (node.__llamaConfigured) return;
+                const computed = node.computeSize();
+                node.setSize([Math.max(computed[0], 320), computed[1]]);
+                node.setDirtyCanvas(true, true);
+            }, 0);
+        };
+
+        // Workflow restore: keep the saved width, only trim the height to the visible widgets.
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            onConfigure?.apply(this, arguments);
+            this.__llamaConfigured = true;
+            const node = this;
+            setTimeout(() => {
+                const computed = node.computeSize();
+                node.setSize([Math.max(node.size[0], computed[0]), computed[1]]);
+                node.setDirtyCanvas(true, true);
+            }, 0);
         };
 
         const onRemoved = nodeType.prototype.onRemoved;
